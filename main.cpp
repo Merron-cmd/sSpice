@@ -42,7 +42,7 @@ void build_ac_mna(int n_nodes, int n_vs, double freq, const string& keep_name,
                   double amp, node** A, node* b);
 string get_basename(const string& filename);
 vector<double> generate_freq_points(double start, double end, int points, int type);
-void solve_dc_operating_point(ostream& out = cout);
+void solve_dc_operating_point(ostream& out = cout, bool print_output = true);
 void solve_ac_single_frequency(double freq, ostream& out = cout, bool with_header = true);
 void solve_ac_sweep(double start, double end, int points, int sweep_type,
                     const string& keep_name, double amplitude, ostream& out = cout);
@@ -90,6 +90,9 @@ vector<Resistor> resistors;
 vector<Capacitor> capacitors;
 vector<Inductor> inductors;
 vector<Diode> diodes;
+
+// ====== DC operating point storage (for AC small-signal) ======
+vector<double> dc_voltages;  // index 0 corresponds to node 1
 
 // ==================== Utility Functions ====================
 double norm2(const node& z) {
@@ -415,30 +418,30 @@ void build_dc_mna_nonlinear(int n_nodes, int n_vs, node** A, node* b, node* x_la
     }
 
     for (auto& d : diodes) {
-    int p = idx(d.node1), q = idx(d.node2);
-    double Vp = (p == -1) ? 0.0 : x_last[p].volt_re;
-    double Vq = (q == -1) ? 0.0 : x_last[q].volt_re;
-    double Vd = Vp - Vq;
+        int p = idx(d.node1), q = idx(d.node2);
+        double Vp = (p == -1) ? 0.0 : x_last[p].volt_re;
+        double Vq = (q == -1) ? 0.0 : x_last[q].volt_re;
+        double Vd = Vp - Vq;
 
-    double g = Is / VT * exp(Vd / VT);                // 电导（雅可比）
-    double Id = Is * (exp(Vd / VT) - 1);              // 当前工作点电流
-    double Ieq = Id - g * Vd;                         // 等效并联电流源（从p到q）
+        double g = Is / VT * exp(Vd / VT);                // 电导（雅可比）
+        double Id = Is * (exp(Vd / VT) - 1);              // 当前工作点电流
+        double Ieq = Id - g * Vd;                         // 等效并联电流源（从p到q）
 
-    // === 导纳矩阵（同电阻） ===
-    if (p != -1) {
-        A[p][p] = A[p][p] + node(g, 0);
-        if (q != -1) A[p][q] = A[p][q] - node(g, 0);
+        // === 导纳矩阵（同电阻） ===
+        if (p != -1) {
+            A[p][p] = A[p][p] + node(g, 0);
+            if (q != -1) A[p][q] = A[p][q] - node(g, 0);
+        }
+        if (q != -1) {
+            A[q][q] = A[q][q] + node(g, 0);
+            if (p != -1) A[q][p] = A[q][p] - node(g, 0);
+        }
+
+        // === RHS（注意符号！） ===
+        // 流入节点 p 的电流为 -Ieq，流入节点 q 的为 +Ieq
+        if (p != -1) b[p] = b[p] - node(Ieq, 0);
+        if (q != -1) b[q] = b[q] + node(Ieq, 0);
     }
-    if (q != -1) {
-        A[q][q] = A[q][q] + node(g, 0);
-        if (p != -1) A[q][p] = A[q][p] - node(g, 0);
-    }
-
-    // === RHS（注意符号！） ===
-    // 流入节点 p 的电流为 -Ieq，流入节点 q 的为 +Ieq
-    if (p != -1) b[p] = b[p] - node(Ieq, 0);
-    if (q != -1) b[q] = b[q] + node(Ieq, 0);
-}
     // Capacitors ignored (open circuit)
 }
 
@@ -516,33 +519,54 @@ void build_ac_mna(int n_nodes, int n_vs, double freq, const string& keep_name,
         vs_idx++;
     }
     // Inductors already handled in admittance
+
+    // ===== Diode small-signal model (linearized conductance) =====
+    for (auto& d : diodes) {
+        int p = idx(d.node1), q = idx(d.node2);
+        double Vp = (p == -1) ? 0.0 : dc_voltages[p];
+        double Vq = (q == -1) ? 0.0 : dc_voltages[q];
+        double Vd = Vp - Vq;
+        double g = Is / VT * exp(Vd / VT); // small-signal conductance
+        if (p != -1) {
+            A[p][p] = A[p][p] + node(g, 0);
+            if (q != -1) A[p][q] = A[p][q] - node(g, 0);
+        }
+        if (q != -1) {
+            A[q][q] = A[q][q] + node(g, 0);
+            if (p != -1) A[q][p] = A[q][p] - node(g, 0);
+        }
+    }
 }
 
 // ==================== DC Analysis ====================
-void solve_dc_operating_point(ostream& out) {
+void solve_dc_operating_point(ostream& out, bool print_output) {
     int max_node = 0;
     for (auto& v : voltage_sources) max_node = max(max_node, max(v.node1, v.node2));
     for (auto& i : current_sources) max_node = max(max_node, max(i.node1, i.node2));
     for (auto& r : resistors)       max_node = max(max_node, max(r.node1, r.node2));
     for (auto& c : capacitors)      max_node = max(max_node, max(c.node1, c.node2));
     for (auto& l : inductors)       max_node = max(max_node, max(l.node1, l.node2));
-    for (auto& d : diodes)       max_node = max(max_node, max(d.node1, d.node2));
+    for (auto& d : diodes)          max_node = max(max_node, max(d.node1, d.node2));
 
     int n_nodes = max_node;
     int n_vs = voltage_sources.size() + inductors.size();
     int total_vars = n_nodes + n_vs;
-    if (total_vars == 0) { out << "No nodes." << endl; return; }
+    if (total_vars == 0) { 
+        out << "No nodes." << endl; 
+        dc_voltages.clear();
+        return; 
+    }
 
     node** A = new node*[total_vars];
     for (int i = 0; i < total_vars; ++i) A[i] = new node[total_vars]();
     node* b = new node[total_vars]();
     node* x = new node[total_vars]();
     for (int i = 0; i < total_vars; ++i) x[i] = node(0, 0);
+
     if(nonlinear == 0){
         //linear once
         build_dc_mna(n_nodes, n_vs, A, b);
         for (int i = 0; i < n_nodes; ++i) A[i][i] = A[i][i] + node(GMIN, 0);
-
         gauss_elimination(total_vars, A, b, x);
     }
     else {
@@ -627,25 +651,39 @@ void solve_dc_operating_point(ostream& out) {
 
         if (!converged) {
             cerr << "Warning: DC nonlinear iteration did not converge after " << MAX_ITER << " steps!" << endl;
-         // 此时 x 为最后一次解，可能不精确，但可以继续输出
+            // 此时 x 为最后一次解，可能不精确，但可以继续输出
         }
+        delete[] x_last;
     }
 
-    out << "=== DC Operating Point ===" << endl;
-    out << "Node  Voltage (V)" << endl;
-    out << "----  -----------" << endl;
-    for (int i = 1; i <= n_nodes; ++i) {
-        double v = x[i-1].volt_re;
-        out << "V" << i << "    " << fixed << setprecision(6) << v << " V" << endl;
+    // Save DC node voltages (for AC small-signal)
+    dc_voltages.clear();
+    dc_voltages.resize(n_nodes);
+    for (int i = 0; i < n_nodes; ++i) {
+        dc_voltages[i] = x[i].volt_re;
     }
-    out << "GND    0.000000 V" << endl;
 
+    if (print_output) {
+        out << "=== DC Operating Point ===" << endl;
+        out << "Node  Voltage (V)" << endl;
+        out << "----  -----------" << endl;
+        for (int i = 1; i <= n_nodes; ++i) {
+            double v = x[i-1].volt_re;
+            out << "V" << i << "    " << fixed << setprecision(6) << v << " V" << endl;
+        }
+        out << "GND    0.000000 V" << endl;
+    }
+
+    // Clean up
     for (int i = 0; i < total_vars; ++i) delete[] A[i];
     delete[] A; delete[] b; delete[] x;
 }
 
 // ==================== AC Single-Frequency Analysis ====================
 void solve_ac_single_frequency(double freq, ostream& out, bool with_header) {
+    // Perform DC analysis first (no print) to get operating point
+    solve_dc_operating_point(cout, false);
+
     int max_node = 0;
     for (auto& v : voltage_sources) max_node = max(max_node, max(v.node1, v.node2));
     for (auto& i : current_sources) max_node = max(max_node, max(i.node1, i.node2));
@@ -686,6 +724,9 @@ void solve_ac_single_frequency(double freq, ostream& out, bool with_header) {
 // ==================== AC Sweep Analysis ====================
 void solve_ac_sweep(double start, double end, int points, int sweep_type,
                     const string& keep_name, double amplitude, ostream& out) {
+    // Perform DC analysis first (no print) – only once
+    solve_dc_operating_point(cout, false);
+
     vector<double> freqs = generate_freq_points(start, end, points, sweep_type);
     if (freqs.empty()) { out << "Error generating frequency points." << endl; return; }
 
@@ -758,6 +799,7 @@ int main() {
         // Clear previous data
         voltage_sources.clear(); current_sources.clear();
         resistors.clear(); capacitors.clear(); inductors.clear();
+        diodes.clear(); // also clear diodes
         read_netlist(fin);
         fin.close();
 
@@ -780,14 +822,14 @@ int main() {
                     string outname = base + "DC.simout";
                     ofstream fout(outname);
                     if (fout) {
-                        solve_dc_operating_point(fout);
+                        solve_dc_operating_point(fout);  // print to file
                         fout.close();
                         cout << "DC results written to " << outname << endl;
                     } else {
                         cerr << "Cannot write to " << outname << endl;
                     }
                     // Also display on screen
-                    solve_dc_operating_point(cout);
+                    solve_dc_operating_point(cout);      // print to screen
                     break;
                 }
                 case 2: {
