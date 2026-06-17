@@ -2,6 +2,9 @@
 #include <cmath>
 using namespace std;
 
+// ==================== Status ====================
+bool nonlinear;
+
 // ==================== Constants ====================
 const double PI = acos(-1.0);
 
@@ -27,6 +30,8 @@ struct node {
 };
 
 #define GMIN 1e-12
+#define VNTOL 1e-6
+#define ABSTOL 1e-12
 
 // ==================== Function Declarations ====================
 double norm2(const node& z);
@@ -62,15 +67,42 @@ struct Resistor { string name; int node1, node2; double value; };
 struct Capacitor { string name; int node1, node2; double value; };
 struct Inductor { string name; int node1, node2; double value; };
 
+const double Is = 1e-14;
+const double VT = 0.026;
+
+struct Diode
+{
+    string name;
+    int node1, node2;
+};
+
+/*
+To make it simple, we supply a fixed type of diode whose parameters are as below
+Is=1e-14
+VT=0.026
+The I-V model is:
+I=Is(exp(V/VT) - 1)
+*/
+
 vector<VoltageSource> voltage_sources;
 vector<CurrentSource> current_sources;
 vector<Resistor> resistors;
 vector<Capacitor> capacitors;
 vector<Inductor> inductors;
+vector<Diode> diodes;
 
 // ==================== Utility Functions ====================
 double norm2(const node& z) {
     return z.volt_re * z.volt_re + z.volt_im * z.volt_im;
+}
+
+double norm2n(node *x, node *y, int a, int b)
+{
+    double norm = 0.0;
+    for(int i = a; i <= b; i ++){
+        norm += norm2(x[i] - y[i]);
+    }
+    return norm;
 }
 
 void gauss_elimination(int n, node** A, node* b, node* x) {
@@ -109,11 +141,11 @@ void gauss_elimination(int n, node** A, node* b, node* x) {
     auto end = steady_clock::now();
     duration<double> elapsed = end - start;
     double sec = elapsed.count();
-    if (sec < 1e-9) cout << "Time: " << sec * 1e12 << " ps" << endl;
+    /*if (sec < 1e-9) cout << "Time: " << sec * 1e12 << " ps" << endl;
     else if (sec < 1e-6) cout << "Time: " << sec * 1e9 << " ns" << endl;
     else if (sec < 1e-3) cout << "Time: " << sec * 1e6 << " us" << endl;
     else if (sec < 1.0) cout << "Time: " << sec * 1e3 << " ms" << endl;
-    else cout << "Time: " << sec << " s" << endl;
+    else cout << "Time: " << sec << " s" << endl;*/
 }
 
 // Format a double: use scientific notation for values with magnitude < 1e-3 (but not zero),
@@ -188,6 +220,7 @@ int read_int(const string& prompt) {
 // ==================== Netlist Reader (from any stream) ====================
 void read_netlist(istream& in) {
     in >> c_size;
+    bool islinear = 1;
     for (int i = 0; i < c_size; ++i) {
         string name; int n1, n2; string token;
         in >> name >> n1 >> n2 >> token;
@@ -240,9 +273,19 @@ void read_netlist(istream& in) {
             case 'L': case 'l':
                 inductors.push_back({name, n1, n2, parse_value(token)});
                 break;
+            case 'D': case 'd':
+                islinear = 0;
+                diodes.push_back({name, n1, n2});
+                break;
             default:
                 cerr << "Error: unknown component type '" << type << "'" << endl;
         }
+    }
+    if(islinear == 1){
+        nonlinear = 0;
+    }
+    else {
+        nonlinear = 1;
     }
     // Check for ground
     bool has_gnd = false;
@@ -333,6 +376,72 @@ void build_dc_mna(int n_nodes, int n_vs, node** A, node* b) {
     // Capacitors ignored (open circuit)
 }
 
+void build_dc_mna_nonlinear(int n_nodes, int n_vs, node** A, node* b, node* x_last) {
+    auto idx = [&](int node) { return (node == 0) ? -1 : node - 1; };
+    // Resistors
+    for (auto& r : resistors) {
+        double g = 1.0 / r.value;
+        int p = idx(r.node1), q = idx(r.node2);
+        if (p != -1) { A[p][p] = A[p][p] + node(g,0); if(q!=-1) A[p][q] = A[p][q] - node(g,0); }
+        if (q != -1) { A[q][q] = A[q][q] + node(g,0); if(p!=-1) A[q][p] = A[q][p] - node(g,0); }
+    }
+    // Current sources (DC only)
+    for (auto& i : current_sources) {
+        double I = i.dc_value;
+        int p = idx(i.node1), q = idx(i.node2);
+        if (p != -1) b[p] = b[p] + node(I,0);
+        if (q != -1) b[q] = b[q] - node(I,0);
+    }
+    // Voltage sources (DC) + Inductors (short circuit)
+    int vs_idx = n_nodes;
+    for (auto& v : voltage_sources) {
+        int p = idx(v.node1), q = idx(v.node2);
+        double V = v.dc_value;
+        if (p != -1) A[p][vs_idx] = A[p][vs_idx] + node(1,0);
+        if (q != -1) A[q][vs_idx] = A[q][vs_idx] - node(1,0);
+        if (p != -1) A[vs_idx][p] = A[vs_idx][p] + node(1,0);
+        if (q != -1) A[vs_idx][q] = A[vs_idx][q] - node(1,0);
+        b[vs_idx] = node(V,0);
+        vs_idx++;
+    }
+    for (auto& l : inductors) {
+        int p = idx(l.node1), q = idx(l.node2);
+        if (p != -1) A[p][vs_idx] = A[p][vs_idx] + node(1,0);
+        if (q != -1) A[q][vs_idx] = A[q][vs_idx] - node(1,0);
+        if (p != -1) A[vs_idx][p] = A[vs_idx][p] + node(1,0);
+        if (q != -1) A[vs_idx][q] = A[vs_idx][q] - node(1,0);
+        b[vs_idx] = node(0,0);
+        vs_idx++;
+    }
+
+    for (auto& d : diodes) {
+    int p = idx(d.node1), q = idx(d.node2);
+    double Vp = (p == -1) ? 0.0 : x_last[p].volt_re;
+    double Vq = (q == -1) ? 0.0 : x_last[q].volt_re;
+    double Vd = Vp - Vq;
+
+    double g = Is / VT * exp(Vd / VT);                // 电导（雅可比）
+    double Id = Is * (exp(Vd / VT) - 1);              // 当前工作点电流
+    double Ieq = Id - g * Vd;                         // 等效并联电流源（从p到q）
+
+    // === 导纳矩阵（同电阻） ===
+    if (p != -1) {
+        A[p][p] = A[p][p] + node(g, 0);
+        if (q != -1) A[p][q] = A[p][q] - node(g, 0);
+    }
+    if (q != -1) {
+        A[q][q] = A[q][q] + node(g, 0);
+        if (p != -1) A[q][p] = A[q][p] - node(g, 0);
+    }
+
+    // === RHS（注意符号！） ===
+    // 流入节点 p 的电流为 -Ieq，流入节点 q 的为 +Ieq
+    if (p != -1) b[p] = b[p] - node(Ieq, 0);
+    if (q != -1) b[q] = b[q] + node(Ieq, 0);
+}
+    // Capacitors ignored (open circuit)
+}
+
 // ==================== AC MNA Construction ====================
 void build_ac_mna(int n_nodes, int n_vs, double freq, const string& keep_name,
                   double amp, node** A, node* b) {
@@ -417,6 +526,7 @@ void solve_dc_operating_point(ostream& out) {
     for (auto& r : resistors)       max_node = max(max_node, max(r.node1, r.node2));
     for (auto& c : capacitors)      max_node = max(max_node, max(c.node1, c.node2));
     for (auto& l : inductors)       max_node = max(max_node, max(l.node1, l.node2));
+    for (auto& d : diodes)       max_node = max(max_node, max(d.node1, d.node2));
 
     int n_nodes = max_node;
     int n_vs = voltage_sources.size() + inductors.size();
@@ -427,11 +537,99 @@ void solve_dc_operating_point(ostream& out) {
     for (int i = 0; i < total_vars; ++i) A[i] = new node[total_vars]();
     node* b = new node[total_vars]();
     node* x = new node[total_vars]();
+    for (int i = 0; i < total_vars; ++i) x[i] = node(0, 0);
+    if(nonlinear == 0){
+        //linear once
+        build_dc_mna(n_nodes, n_vs, A, b);
+        for (int i = 0; i < n_nodes; ++i) A[i][i] = A[i][i] + node(GMIN, 0);
 
-    build_dc_mna(n_nodes, n_vs, A, b);
-    for (int i = 0; i < n_nodes; ++i) A[i][i] = A[i][i] + node(GMIN, 0);
+        gauss_elimination(total_vars, A, b, x);
+    }
+    else {
+        // 非线性电路：牛顿-拉夫逊迭代，带阻尼
+        node* x_last = new node[total_vars]();
+        for (int i = 0; i < total_vars; ++i) x_last[i] = node(0, 0);
 
-    gauss_elimination(total_vars, A, b, x);
+        const int MAX_ITER = 1000;
+        const double MAX_V_STEP = 0.1;   // 节点电压每次最大变化 0.1V
+        const double MAX_I_STEP = 0.001; // 电流变量每次最大变化 1mA
+
+        int iter = 0;
+        bool converged = false;
+
+        while (iter < MAX_ITER) {
+            // 清空矩阵和RHS
+            for (int i = 0; i < total_vars; ++i) {
+                fill(A[i], A[i] + total_vars, node(0,0));
+                b[i] = node(0,0);
+            }
+
+            // 构建线性化系统（基于当前 x_last）
+            build_dc_mna_nonlinear(n_nodes, n_vs, A, b, x_last);
+
+            // 添加 GMIN 防止浮地
+            for (int i = 0; i < n_nodes; ++i) {
+                A[i][i] = A[i][i] + node(GMIN, 0);
+            }
+
+            // 求解得到 x（牛顿步）
+            gauss_elimination(total_vars, A, b, x);
+
+            // 计算变化量
+            double max_delta_v = 0.0, max_delta_i = 0.0;
+            for (int i = 0; i < n_nodes; ++i) {
+                double delta = fabs(x[i].volt_re - x_last[i].volt_re);
+                if (delta > max_delta_v) max_delta_v = delta;
+            }
+            for (int i = n_nodes; i < total_vars; ++i) {
+                double delta = fabs(x[i].volt_re - x_last[i].volt_re);
+                if (delta > max_delta_i) max_delta_i = delta;
+            }
+
+            // 阻尼缩放
+            double scale = 1.0;
+            if (max_delta_v > MAX_V_STEP) {
+                scale = min(scale, MAX_V_STEP / max_delta_v);
+            }
+            if (max_delta_i > MAX_I_STEP) {
+                scale = min(scale, MAX_I_STEP / max_delta_i);
+            }
+
+            // 应用阻尼：x = x_last + scale * (x - x_last)
+            if (scale < 1.0) {
+                for (int i = 0; i < total_vars; ++i) {
+                    x[i].volt_re = x_last[i].volt_re + scale * (x[i].volt_re - x_last[i].volt_re);
+                    x[i].volt_im = 0.0; // 直流分析虚部始终为0
+                }
+            }
+
+            // 检查收敛条件
+            double max_volt = 0.0, max_curr = 0.0;
+            for (int i = 0; i < n_nodes; ++i) {
+                max_volt = max(max_volt, fabs(x[i].volt_re - x_last[i].volt_re));
+            }
+            for (int i = n_nodes; i < total_vars; ++i) {
+                max_curr = max(max_curr, fabs(x[i].volt_re - x_last[i].volt_re));
+            }
+
+            if (max_volt < VNTOL && max_curr < ABSTOL) {
+                converged = true;
+                break;
+            }
+
+            // 更新 x_last 为当前解
+            for (int i = 0; i < total_vars; ++i) {
+                x_last[i] = x[i];
+            }
+
+            iter++;
+        }
+
+        if (!converged) {
+            cerr << "Warning: DC nonlinear iteration did not converge after " << MAX_ITER << " steps!" << endl;
+         // 此时 x 为最后一次解，可能不精确，但可以继续输出
+        }
+    }
 
     out << "=== DC Operating Point ===" << endl;
     out << "Node  Voltage (V)" << endl;
