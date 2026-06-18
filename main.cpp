@@ -2,11 +2,94 @@
 #include <cmath>
 using namespace std;
 
+using namespace std::chrono;
+
+// 自适应格式化函数
+std::string format_duration(double seconds) {
+    const double MIN = 60.0;
+    const double NS = 1e-9;
+    const double US = 1e-6;
+    const double MS = 1e-3;
+
+    if (seconds >= MIN) {
+        return std::to_string(seconds / MIN) + " min";
+    } else if (seconds >= 1.0) {
+        return std::to_string(seconds) + " s";
+    } else if (seconds >= 1.0) {
+        return std::to_string(seconds * 1000) + " ms";
+    } else if (seconds >= MS) {
+        return std::to_string(seconds * 1000) + " ms";
+    } else if (seconds >= US) {
+        return std::to_string(seconds * 1e6) + " us";
+    } else if (seconds >= NS) {
+        return std::to_string(seconds * 1e9) + " ns";
+    } else {
+        return "< 1 ns";
+    }
+}
+
+// 计时器类
+class Timer {
+private:
+    high_resolution_clock::time_point start_time;
+    bool running = false;
+    duration<double> elapsed;  // 累计时间（秒）
+
+public:
+    Timer() : elapsed(0) {}
+
+    void start() {
+        if (running) return;   // 若已启动则忽略
+        running = true;
+        start_time = high_resolution_clock::now();
+    }
+
+    void stop() {
+        if (!running) return;  // 未启动则忽略
+        auto end_time = high_resolution_clock::now();
+        elapsed += duration<double>(end_time - start_time);
+        running = false;
+    }
+
+    void reset() {
+        running = false;
+        elapsed = duration<double>::zero();
+    }
+
+    // 返回当前累计时间（秒）
+    double seconds() const {
+        if (running) {
+            auto now = high_resolution_clock::now();
+            return elapsed.count() + duration<double>(now - start_time).count();
+        }
+        return elapsed.count();
+    }
+
+    // 返回格式化的时间字符串
+    std::string str() const {
+        return format_duration(seconds());
+    }
+
+    // 重载输出流
+    friend std::ostream& operator<<(std::ostream& os, const Timer& t) {
+        os << t.str();
+        return os;
+    }
+};
+
+
 // ==================== Status ====================
 bool nonlinear;
 
 // ==================== Constants ====================
 const double PI = acos(-1.0);
+const double GMIN = 1e-12;
+const double VNTOL = 1e-6;
+const double ABSTOL = 1e-12;
+const double RELTOL = 1e-4;
+
+// ==================== Global Timestep (unused, kept for compatibility) ====================
+double TIMESTEP = 1e-9;
 
 // ==================== Complex Number Struct & Operations ====================
 struct node {
@@ -29,11 +112,6 @@ struct node {
     }
 };
 
-#define GMIN 1e-12
-#define VNTOL 1e-6
-#define ABSTOL 1e-12
-#define RELTOL 1e-4
-
 // ==================== Function Declarations ====================
 double norm2(const node& z);
 void matrix_mul_vec(int n, node** A, node* x, node* ans);
@@ -49,61 +127,47 @@ void solve_dc_operating_point(ostream& out = cout, bool print_output = true);
 void solve_ac_single_frequency(double freq, ostream& out = cout, bool with_header = true);
 void solve_ac_sweep(double start, double end, int points, int sweep_type,
                     const string& keep_name, double amplitude, ostream& out = cout);
-
 string format_double(double val, int precision = 8);
+double parse_value(const string& s);
+double read_double_with_units(istream& in);
+int read_int(const string& prompt);
 
-// Global variables
+// ----- Transient functions -----
+vector<double> solve_dc_full(int& n_nodes, int& n_vs);
+void build_transient_mna(int n_nodes, int n_vs, double dt, double time,
+                         const vector<double>& x,
+                         const vector<double>& prev_cap_volt,
+                         const vector<double>& prev_ind_curr,
+                         node** A, node* b);
+void solve_transient(double tstop, double dt, ostream& out);
+
+// ==================== Global Data Structures ====================
 string current_filename;
 int c_size;
-enum SourceType { DC_SOURCE, AC_SOURCE };
+enum SourceType { DC_SOURCE, AC_SOURCE, SQUARE_SOURCE };
 
 struct VoltageSource {
     string name; int node1, node2; SourceType type;
     double dc_value, ac_magnitude, ac_freq, ac_phase;
+    // 方波参数
+    double square_amp, square_freq, square_duty, square_offset;
 };
 struct CurrentSource {
     string name; int node1, node2; SourceType type;
     double dc_value, ac_magnitude, ac_freq, ac_phase;
+    // 方波参数
+    double square_amp, square_freq, square_duty, square_offset;
 };
 struct Resistor { string name; int node1, node2; double value; };
 struct Capacitor { string name; int node1, node2; double value; };
 struct Inductor { string name; int node1, node2; double value; };
-
 const double Is = 1e-14;
 const double VT = 0.026;
-
-struct Diode {
-    string name;
-    int node1, node2;
-};
-
-struct VCVS {
-    string name;
-    int node1, node2;
-    int node3, node4;
-    double gain;
-};
-
-struct VCCS {
-    string name;
-    int node1, node2;
-    int node3, node4;
-    double trans;
-};
-
-struct CCCS {
-    string name;
-    int node1, node2;
-    string ctrl_vsource_name;   // 控制电压源的名字
-    double gain;
-};
-
-struct CCVS {
-    string name;
-    int node1, node2;
-    string ctrl_vsource_name;   // 控制电压源的名字
-    double trans;
-};
+struct Diode { string name; int node1, node2; };
+struct VCVS { string name; int node1, node2; int node3, node4; double gain; };
+struct VCCS { string name; int node1, node2; int node3, node4; double trans; };
+struct CCCS { string name; int node1, node2; string ctrl_vsource_name; double gain; };
+struct CCVS { string name; int node1, node2; string ctrl_vsource_name; double trans; };
 
 vector<VoltageSource> voltage_sources;
 vector<CurrentSource> current_sources;
@@ -236,10 +300,11 @@ void read_netlist(istream& in) {
         char type = name[0];
         switch (type) {
             case 'V': case 'v': {
-                VoltageSource vs{name, n1, n2, DC_SOURCE, 0, 0, 0, 0};
+                VoltageSource vs{name, n1, n2, DC_SOURCE, 0, 0, 0, 0, 0, 0, 0, 0};
                 if (token == "DC" || token == "dc") {
                     string val; in >> val;
-                    vs.type = DC_SOURCE; vs.dc_value = parse_value(val);
+                    vs.type = DC_SOURCE;
+                    vs.dc_value = parse_value(val);
                 } else if (token == "AC" || token == "ac") {
                     string mag, freq, ph; in >> mag >> freq >> ph;
                     vs.type = AC_SOURCE;
@@ -247,6 +312,21 @@ void read_netlist(istream& in) {
                     vs.ac_freq = parse_value(freq);
                     vs.ac_phase = parse_value(ph);
                     vs.dc_value = 0.0;
+                } else if (token == "SQUARE" || token == "square") {
+                    double amp = read_double_with_units(in);
+                    double freq = read_double_with_units(in);
+                    double duty = read_double_with_units(in);
+                    double offset = 0.0;
+                    if (!(in >> offset)) {
+                        in.clear();
+                        offset = 0.0;
+                    }
+                    vs.type = SQUARE_SOURCE;
+                    vs.square_amp = amp;
+                    vs.square_freq = freq;
+                    vs.square_duty = duty;
+                    vs.square_offset = offset;
+                    vs.dc_value = offset;
                 } else {
                     vs.type = DC_SOURCE;
                     vs.dc_value = parse_value(token);
@@ -255,10 +335,11 @@ void read_netlist(istream& in) {
                 break;
             }
             case 'I': case 'i': {
-                CurrentSource cs{name, n1, n2, DC_SOURCE, 0, 0, 0, 0};
+                CurrentSource cs{name, n1, n2, DC_SOURCE, 0, 0, 0, 0, 0, 0, 0, 0};
                 if (token == "DC" || token == "dc") {
                     string val; in >> val;
-                    cs.type = DC_SOURCE; cs.dc_value = parse_value(val);
+                    cs.type = DC_SOURCE;
+                    cs.dc_value = parse_value(val);
                 } else if (token == "AC" || token == "ac") {
                     string mag, freq, ph; in >> mag >> freq >> ph;
                     cs.type = AC_SOURCE;
@@ -266,6 +347,21 @@ void read_netlist(istream& in) {
                     cs.ac_freq = parse_value(freq);
                     cs.ac_phase = parse_value(ph);
                     cs.dc_value = 0.0;
+                } else if (token == "SQUARE" || token == "square") {
+                    double amp = read_double_with_units(in);
+                    double freq = read_double_with_units(in);
+                    double duty = read_double_with_units(in);
+                    double offset = 0.0;
+                    if (!(in >> offset)) {
+                        in.clear();
+                        offset = 0.0;
+                    }
+                    cs.type = SQUARE_SOURCE;
+                    cs.square_amp = amp;
+                    cs.square_freq = freq;
+                    cs.square_duty = duty;
+                    cs.square_offset = offset;
+                    cs.dc_value = offset;
                 } else {
                     cs.type = DC_SOURCE;
                     cs.dc_value = parse_value(token);
@@ -324,7 +420,7 @@ void read_netlist(istream& in) {
     }
     if(islinear == 1) nonlinear = 0;
     else nonlinear = 1;
-    // Check ground
+    // Check ground (same as original)
     bool has_gnd = false;
     for (auto& v : voltage_sources) if (v.node1==0 || v.node2==0) has_gnd = true;
     for (auto& i : current_sources) if (i.node1==0 || i.node2==0) has_gnd = true;
@@ -372,8 +468,7 @@ vector<double> generate_freq_points(double start, double end, int points, int ty
     return freqs;
 }
 
-// ==================== MNA Build Functions ====================
-// Helper to create name->index map for current variables
+// ==================== MNA Build Functions (original) ====================
 static unordered_map<string, int> build_name_index_map(int n_nodes, int &n_vs) {
     unordered_map<string, int> mp;
     int vs_idx = n_nodes;
@@ -385,7 +480,6 @@ static unordered_map<string, int> build_name_index_map(int n_nodes, int &n_vs) {
     return mp;
 }
 
-// DC linear MNA
 void build_dc_mna(int n_nodes, int n_vs, node** A, node* b) {
     auto idx = [&](int node) { return (node == 0) ? -1 : node - 1; };
     // Resistors
@@ -397,19 +491,17 @@ void build_dc_mna(int n_nodes, int n_vs, node** A, node* b) {
     }
     // Current sources
     for (auto& i : current_sources) {
-        double I = i.dc_value;
+        double I = i.dc_value;  // 对于方波，dc_value已设为offset
         int p = idx(i.node1), q = idx(i.node2);
         if (p != -1) b[p] = b[p] + node(I,0);
         if (q != -1) b[q] = b[q] - node(I,0);
     }
-
     int vs_idx = n_nodes;
-    unordered_map<string, int> name_to_idx = build_name_index_map(n_nodes, n_vs); // n_vs is passed by reference
-
+    unordered_map<string, int> name_to_idx = build_name_index_map(n_nodes, n_vs);
     // Independent voltage sources
     for (auto& v : voltage_sources) {
         int p = idx(v.node1), q = idx(v.node2);
-        double V = v.dc_value;
+        double V = v.dc_value;  // 方波DC偏移
         if (p != -1) A[p][vs_idx] = A[p][vs_idx] + node(1,0);
         if (q != -1) A[q][vs_idx] = A[q][vs_idx] - node(1,0);
         if (p != -1) A[vs_idx][p] = A[vs_idx][p] + node(1,0);
@@ -417,7 +509,6 @@ void build_dc_mna(int n_nodes, int n_vs, node** A, node* b) {
         b[vs_idx] = node(V,0);
         vs_idx++;
     }
-
     // Inductors (short circuit in DC)
     for (auto& l : inductors) {
         int p = idx(l.node1), q = idx(l.node2);
@@ -428,7 +519,6 @@ void build_dc_mna(int n_nodes, int n_vs, node** A, node* b) {
         b[vs_idx] = node(0,0);
         vs_idx++;
     }
-
     // VCVS (E)
     for (auto& e : vcvs) {
         int p_out = idx(e.node1), q_out = idx(e.node2);
@@ -442,7 +532,6 @@ void build_dc_mna(int n_nodes, int n_vs, node** A, node* b) {
         if (q_ctrl != -1) A[vs_idx][q_ctrl] = A[vs_idx][q_ctrl] + node(gain,0);
         vs_idx++;
     }
-
     // CCVS (H)
     for (auto& h : ccvs) {
         int p_out = idx(h.node1), q_out = idx(h.node2);
@@ -460,7 +549,6 @@ void build_dc_mna(int n_nodes, int n_vs, node** A, node* b) {
         A[vs_idx][ctrl_idx] = A[vs_idx][ctrl_idx] + node(trans,0);
         vs_idx++;
     }
-
     // VCCS (G)
     for (auto& g : vccs) {
         int p_out = idx(g.node1), q_out = idx(g.node2);
@@ -475,7 +563,6 @@ void build_dc_mna(int n_nodes, int n_vs, node** A, node* b) {
             if (q_ctrl != -1) A[q_out][q_ctrl] = A[q_out][q_ctrl] + node(trans,0);
         }
     }
-
     // CCCS (F)
     for (auto& f : cccs) {
         int p_out = idx(f.node1), q_out = idx(f.node2);
@@ -489,11 +576,9 @@ void build_dc_mna(int n_nodes, int n_vs, node** A, node* b) {
         if (p_out != -1) A[p_out][ctrl_idx] = A[p_out][ctrl_idx] - node(gain,0);
         if (q_out != -1) A[q_out][ctrl_idx] = A[q_out][ctrl_idx] + node(gain,0);
     }
-
     // Capacitors ignored in DC
 }
 
-// Nonlinear DC MNA (with diodes)
 void build_dc_mna_nonlinear(int n_nodes, int n_vs, node** A, node* b, node* x_last) {
     auto idx = [&](int node) { return (node == 0) ? -1 : node - 1; };
     // Resistors
@@ -505,20 +590,17 @@ void build_dc_mna_nonlinear(int n_nodes, int n_vs, node** A, node* b, node* x_la
     }
     // Current sources
     for (auto& i : current_sources) {
-        double I = i.dc_value;
+        double I = i.dc_value;  // 方波偏移
         int p = idx(i.node1), q = idx(i.node2);
         if (p != -1) b[p] = b[p] + node(I,0);
         if (q != -1) b[q] = b[q] - node(I,0);
     }
-
     int vs_idx = n_nodes;
     unordered_map<string, int> name_to_idx;
     for (auto& v : voltage_sources) name_to_idx[v.name] = vs_idx++;
     for (auto& l : inductors)       name_to_idx[l.name] = vs_idx++;
     for (auto& e : vcvs)            name_to_idx[e.name] = vs_idx++;
     for (auto& h : ccvs)            name_to_idx[h.name] = vs_idx++;
-    // n_vs is fixed, but we don't use it here
-
     // Independent voltage sources
     vs_idx = n_nodes;
     for (auto& v : voltage_sources) {
@@ -598,7 +680,6 @@ void build_dc_mna_nonlinear(int n_nodes, int n_vs, node** A, node* b, node* x_la
         if (p_out != -1) A[p_out][ctrl_idx] = A[p_out][ctrl_idx] - node(gain,0);
         if (q_out != -1) A[q_out][ctrl_idx] = A[q_out][ctrl_idx] + node(gain,0);
     }
-
     // Diodes
     for (auto& d : diodes) {
         int p = idx(d.node1), q = idx(d.node2);
@@ -622,12 +703,10 @@ void build_dc_mna_nonlinear(int n_nodes, int n_vs, node** A, node* b, node* x_la
     // Capacitors ignored
 }
 
-// AC MNA
 void build_ac_mna(int n_nodes, int n_vs, double freq, const string& keep_name,
                   double amp, node** A, node* b) {
     double omega = 2.0 * PI * freq;
     auto idx = [&](int node) { return (node == 0) ? -1 : node - 1; };
-
     // Resistors
     for (auto& r : resistors) {
         double g = 1.0 / r.value;
@@ -642,10 +721,7 @@ void build_ac_mna(int n_nodes, int n_vs, double freq, const string& keep_name,
         if (p != -1) { A[p][p] = A[p][p] + node(0, y_im); if(q!=-1) A[p][q] = A[p][q] - node(0, y_im); }
         if (q != -1) { A[q][q] = A[q][q] + node(0, y_im); if(p!=-1) A[q][p] = A[q][p] - node(0, y_im); }
     }
-    // Inductors: We will NOT use admittance, but introduce branch equation with current variable.
-    // So skip admittance for inductors here.
-
-    // Current sources (AC)
+    // Current sources (AC) - 忽略方波源
     for (auto& i : current_sources) {
         double I = 0.0;
         if (keep_name.empty()) {
@@ -665,14 +741,12 @@ void build_ac_mna(int n_nodes, int n_vs, double freq, const string& keep_name,
             }
         }
     }
-
     int vs_idx = n_nodes;
     unordered_map<string, int> name_to_idx;
     for (auto& v : voltage_sources) name_to_idx[v.name] = vs_idx++;
     for (auto& l : inductors)       name_to_idx[l.name] = vs_idx++;
     for (auto& e : vcvs)            name_to_idx[e.name] = vs_idx++;
     for (auto& h : ccvs)            name_to_idx[h.name] = vs_idx++;
-
     // Independent voltage sources
     vs_idx = n_nodes;
     for (auto& v : voltage_sources) {
@@ -696,24 +770,19 @@ void build_ac_mna(int n_nodes, int n_vs, double freq, const string& keep_name,
         if (q != -1) A[vs_idx][q] = A[vs_idx][q] - node(1,0);
         vs_idx++;
     }
-
-    // Inductors: branch equation V(p) - V(q) = jωL * I_L  =>  V(p)-V(q) - jωL*I = 0
+    // Inductors: V(p)-V(q) - jωL*I = 0
     for (auto& l : inductors) {
         int p = idx(l.node1), q = idx(l.node2);
         double L = l.value;
-        node impedance(0, omega * L); // jωL
-        // KCL: current flows from p to q
+        node impedance(0, omega * L);
         if (p != -1) A[p][vs_idx] = A[p][vs_idx] + node(1,0);
         if (q != -1) A[q][vs_idx] = A[q][vs_idx] - node(1,0);
-        // Branch equation: V(p)-V(q) - (jωL)*I = 0
         if (p != -1) A[vs_idx][p] = A[vs_idx][p] + node(1,0);
         if (q != -1) A[vs_idx][q] = A[vs_idx][q] - node(1,0);
-        A[vs_idx][vs_idx] = A[vs_idx][vs_idx] - impedance; // -jωL
-        // RHS = 0
+        A[vs_idx][vs_idx] = A[vs_idx][vs_idx] - impedance;
         vs_idx++;
     }
-
-    // VCVS (E)
+    // VCVS
     for (auto& e : vcvs) {
         int p_out = idx(e.node1), q_out = idx(e.node2);
         int p_ctrl = idx(e.node3), q_ctrl = idx(e.node4);
@@ -726,8 +795,7 @@ void build_ac_mna(int n_nodes, int n_vs, double freq, const string& keep_name,
         if (q_ctrl != -1) A[vs_idx][q_ctrl] = A[vs_idx][q_ctrl] + node(gain,0);
         vs_idx++;
     }
-
-    // CCVS (H)
+    // CCVS
     for (auto& h : ccvs) {
         int p_out = idx(h.node1), q_out = idx(h.node2);
         double trans = h.trans;
@@ -744,8 +812,7 @@ void build_ac_mna(int n_nodes, int n_vs, double freq, const string& keep_name,
         A[vs_idx][ctrl_idx] = A[vs_idx][ctrl_idx] + node(trans,0);
         vs_idx++;
     }
-
-    // VCCS (G)
+    // VCCS
     for (auto& g : vccs) {
         int p_out = idx(g.node1), q_out = idx(g.node2);
         int p_ctrl = idx(g.node3), q_ctrl = idx(g.node4);
@@ -759,8 +826,7 @@ void build_ac_mna(int n_nodes, int n_vs, double freq, const string& keep_name,
             if (q_ctrl != -1) A[q_out][q_ctrl] = A[q_out][q_ctrl] + node(trans,0);
         }
     }
-
-    // CCCS (F)
+    // CCCS
     for (auto& f : cccs) {
         int p_out = idx(f.node1), q_out = idx(f.node2);
         double gain = f.gain;
@@ -773,7 +839,6 @@ void build_ac_mna(int n_nodes, int n_vs, double freq, const string& keep_name,
         if (p_out != -1) A[p_out][ctrl_idx] = A[p_out][ctrl_idx] - node(gain,0);
         if (q_out != -1) A[q_out][ctrl_idx] = A[q_out][ctrl_idx] + node(gain,0);
     }
-
     // Diodes: small-signal conductance
     for (auto& d : diodes) {
         int p = idx(d.node1), q = idx(d.node2);
@@ -792,8 +857,8 @@ void build_ac_mna(int n_nodes, int n_vs, double freq, const string& keep_name,
     }
 }
 
-// ==================== DC Analysis ====================
-void solve_dc_operating_point(ostream& out, bool print_output) {
+// ==================== DC Analysis (refactored) ====================
+vector<double> solve_dc_full(int& n_nodes, int& n_vs) {
     int max_node = 0;
     for (auto& v : voltage_sources) max_node = max(max_node, max(v.node1, v.node2));
     for (auto& i : current_sources) max_node = max(max_node, max(i.node1, i.node2));
@@ -806,14 +871,13 @@ void solve_dc_operating_point(ostream& out, bool print_output) {
     for (auto& f : cccs)            max_node = max(max_node, max(f.node1, f.node2));
     for (auto& h : ccvs)            max_node = max(max_node, max(h.node1, h.node2));
 
-    int n_nodes = max_node;
-    // Count current variables: voltage sources, inductors, VCVS, CCVS
-    int n_vs = voltage_sources.size() + inductors.size() + vcvs.size() + ccvs.size();
+    n_nodes = max_node;
+    n_vs = voltage_sources.size() + inductors.size() + vcvs.size() + ccvs.size();
     int total_vars = n_nodes + n_vs;
+    vector<double> x_vec;
     if (total_vars == 0) {
-        out << "No nodes." << endl;
         dc_voltages.clear();
-        return;
+        return x_vec;
     }
 
     node** A = new node*[total_vars];
@@ -900,16 +964,338 @@ void solve_dc_operating_point(ostream& out, bool print_output) {
     dc_voltages.resize(n_nodes);
     for (int i = 0; i < n_nodes; ++i) dc_voltages[i] = x[i].volt_re;
 
+    x_vec.resize(total_vars);
+    for (int i = 0; i < total_vars; ++i) x_vec[i] = x[i].volt_re;
+
+    for (int i = 0; i < total_vars; ++i) delete[] A[i];
+    delete[] A; delete[] b; delete[] x;
+    return x_vec;
+}
+
+void solve_dc_operating_point(ostream& out, bool print_output) {
+    int n_nodes, n_vs;
+    vector<double> x = solve_dc_full(n_nodes, n_vs);
     if (print_output) {
         out << "=== DC Operating Point ===" << endl;
         out << "Node  Voltage (V)" << endl;
         out << "----  -----------" << endl;
         for (int i = 1; i <= n_nodes; ++i) {
-            out << "V" << i << "    " << fixed << setprecision(6) << x[i-1].volt_re << " V" << endl;
+            out << "V" << i << "    " << fixed << setprecision(6) << dc_voltages[i-1] << " V" << endl;
         }
         out << "GND    0.000000 V" << endl;
     }
+}
 
+// ==================== Transient Analysis ====================
+void build_transient_mna(int n_nodes, int n_vs, double dt, double time,
+                         const vector<double>& x,
+                         const vector<double>& prev_cap_volt,
+                         const vector<double>& prev_ind_curr,
+                         node** A, node* b) {
+    auto idx = [&](int node) { return (node == 0) ? -1 : node - 1; };
+
+    // Resistors
+    for (auto& r : resistors) {
+        double g = 1.0 / r.value;
+        int p = idx(r.node1), q = idx(r.node2);
+        if (p != -1) { A[p][p] = A[p][p] + node(g,0); if(q!=-1) A[p][q] = A[p][q] - node(g,0); }
+        if (q != -1) { A[q][q] = A[q][q] + node(g,0); if(p!=-1) A[q][p] = A[q][p] - node(g,0); }
+    }
+
+    // Independent current sources (DC + AC sinusoidal + Square)
+    for (auto& i : current_sources) {
+        double I = 0.0;
+        if (i.type == DC_SOURCE) {
+            I = i.dc_value;
+        } else if (i.type == AC_SOURCE) {
+            double phase_rad = i.ac_phase * PI / 180.0;
+            I = i.dc_value + i.ac_magnitude * sin(2.0 * PI * i.ac_freq * time + phase_rad);
+        } else if (i.type == SQUARE_SOURCE) {
+            double T = 1.0 / i.square_freq;
+            double t_mod = fmod(time, T);
+            if (t_mod < i.square_duty * T)
+                I = i.square_offset + i.square_amp;
+            else
+                I = i.square_offset - i.square_amp;
+        }
+        int p = idx(i.node1), q = idx(i.node2);
+        if (p != -1) b[p] = b[p] + node(I,0);
+        if (q != -1) b[q] = b[q] - node(I,0);
+    }
+
+    // Build name-to-index for voltage sources and inductors etc.
+    int vs_idx = n_nodes;
+    unordered_map<string, int> name_to_idx;
+    for (auto& v : voltage_sources) name_to_idx[v.name] = vs_idx++;
+    for (auto& l : inductors)       name_to_idx[l.name] = vs_idx++;
+    for (auto& e : vcvs)            name_to_idx[e.name] = vs_idx++;
+    for (auto& h : ccvs)            name_to_idx[h.name] = vs_idx++;
+
+    // Voltage sources (DC + AC sinusoidal + Square)
+    vs_idx = n_nodes;
+    for (auto& v : voltage_sources) {
+        int p = idx(v.node1), q = idx(v.node2);
+        double V = 0.0;
+        if (v.type == DC_SOURCE) {
+            V = v.dc_value;
+        } else if (v.type == AC_SOURCE) {
+            double phase_rad = v.ac_phase * PI / 180.0;
+            V = v.dc_value + v.ac_magnitude * sin(2.0 * PI * v.ac_freq * time + phase_rad);
+        } else if (v.type == SQUARE_SOURCE) {
+            double T = 1.0 / v.square_freq;
+            double t_mod = fmod(time, T);
+            if (t_mod < v.square_duty * T)
+                V = v.square_offset + v.square_amp;
+            else
+                V = v.square_offset - v.square_amp;
+        }
+        if (p != -1) A[p][vs_idx] = A[p][vs_idx] + node(1,0);
+        if (q != -1) A[q][vs_idx] = A[q][vs_idx] - node(1,0);
+        if (p != -1) A[vs_idx][p] = A[vs_idx][p] + node(1,0);
+        if (q != -1) A[vs_idx][q] = A[vs_idx][q] - node(1,0);
+        b[vs_idx] = node(V,0);
+        vs_idx++;
+    }
+
+    // Inductors (Backward Euler: Vp - Vq - (L/dt)*i = -(L/dt)*i_prev)
+    int ind_start = n_nodes + voltage_sources.size();
+    for (size_t idx_l = 0; idx_l < inductors.size(); ++idx_l) {
+        auto& l = inductors[idx_l];
+        int p = idx(l.node1), q = idx(l.node2);
+        double L = l.value;
+        double G = L / dt;
+        int ivar = ind_start + idx_l;
+        if (p != -1) A[p][ivar] = A[p][ivar] + node(1,0);
+        if (q != -1) A[q][ivar] = A[q][ivar] - node(1,0);
+        if (p != -1) A[ivar][p] = A[ivar][p] + node(1,0);
+        if (q != -1) A[ivar][q] = A[ivar][q] - node(1,0);
+        A[ivar][ivar] = A[ivar][ivar] - node(G,0);
+        b[ivar] = node(-G * prev_ind_curr[idx_l], 0);
+    }
+
+    // VCVS
+    vs_idx = n_nodes + voltage_sources.size() + inductors.size();
+    for (auto& e : vcvs) {
+        int p_out = idx(e.node1), q_out = idx(e.node2);
+        int p_ctrl = idx(e.node3), q_ctrl = idx(e.node4);
+        double gain = e.gain;
+        if (p_out != -1) A[p_out][vs_idx] = A[p_out][vs_idx] + node(1,0);
+        if (q_out != -1) A[q_out][vs_idx] = A[q_out][vs_idx] - node(1,0);
+        if (p_out != -1) A[vs_idx][p_out] = A[vs_idx][p_out] + node(1,0);
+        if (q_out != -1) A[vs_idx][q_out] = A[vs_idx][q_out] - node(1,0);
+        if (p_ctrl != -1) A[vs_idx][p_ctrl] = A[vs_idx][p_ctrl] - node(gain,0);
+        if (q_ctrl != -1) A[vs_idx][q_ctrl] = A[vs_idx][q_ctrl] + node(gain,0);
+        vs_idx++;
+    }
+
+    // CCVS
+    for (auto& h : ccvs) {
+        int p_out = idx(h.node1), q_out = idx(h.node2);
+        double trans = h.trans;
+        auto it = name_to_idx.find(h.ctrl_vsource_name);
+        if (it == name_to_idx.end()) {
+            cerr << "Error: CCVS " << h.name << " controls unknown source " << h.ctrl_vsource_name << endl;
+            continue;
+        }
+        int ctrl_idx = it->second;
+        if (p_out != -1) A[p_out][vs_idx] = A[p_out][vs_idx] + node(1,0);
+        if (q_out != -1) A[q_out][vs_idx] = A[q_out][vs_idx] - node(1,0);
+        if (p_out != -1) A[vs_idx][p_out] = A[vs_idx][p_out] + node(1,0);
+        if (q_out != -1) A[vs_idx][q_out] = A[vs_idx][q_out] - node(1,0);
+        A[vs_idx][ctrl_idx] = A[vs_idx][ctrl_idx] + node(trans,0);
+        vs_idx++;
+    }
+
+    // VCCS
+    for (auto& g : vccs) {
+        int p_out = idx(g.node1), q_out = idx(g.node2);
+        int p_ctrl = idx(g.node3), q_ctrl = idx(g.node4);
+        double trans = g.trans;
+        if (p_out != -1) {
+            if (p_ctrl != -1) A[p_out][p_ctrl] = A[p_out][p_ctrl] + node(trans,0);
+            if (q_ctrl != -1) A[p_out][q_ctrl] = A[p_out][q_ctrl] - node(trans,0);
+        }
+        if (q_out != -1) {
+            if (p_ctrl != -1) A[q_out][p_ctrl] = A[q_out][p_ctrl] - node(trans,0);
+            if (q_ctrl != -1) A[q_out][q_ctrl] = A[q_out][q_ctrl] + node(trans,0);
+        }
+    }
+
+    // CCCS
+    for (auto& f : cccs) {
+        int p_out = idx(f.node1), q_out = idx(f.node2);
+        double gain = f.gain;
+        auto it = name_to_idx.find(f.ctrl_vsource_name);
+        if (it == name_to_idx.end()) {
+            cerr << "Error: CCCS " << f.name << " controls unknown source " << f.ctrl_vsource_name << endl;
+            continue;
+        }
+        int ctrl_idx = it->second;
+        if (p_out != -1) A[p_out][ctrl_idx] = A[p_out][ctrl_idx] - node(gain,0);
+        if (q_out != -1) A[q_out][ctrl_idx] = A[q_out][ctrl_idx] + node(gain,0);
+    }
+
+    // Diodes (nonlinear, using current estimate x)
+    for (auto& d : diodes) {
+        int p = idx(d.node1), q = idx(d.node2);
+        double Vp = (p == -1) ? 0.0 : x[p];
+        double Vq = (q == -1) ? 0.0 : x[q];
+        double Vd = Vp - Vq;
+        double g = Is / VT * exp(Vd / VT);
+        double Id = Is * (exp(Vd / VT) - 1);
+        double Ieq = Id - g * Vd;
+        if (p != -1) {
+            A[p][p] = A[p][p] + node(g,0);
+            if (q != -1) A[p][q] = A[p][q] - node(g,0);
+        }
+        if (q != -1) {
+            A[q][q] = A[q][q] + node(g,0);
+            if (p != -1) A[q][p] = A[q][p] - node(g,0);
+        }
+        if (p != -1) b[p] = b[p] - node(Ieq,0);
+        if (q != -1) b[q] = b[q] + node(Ieq,0);
+    }
+
+    // Capacitors (Backward Euler: i = C/dt*(V - V_prev))
+    for (size_t idx_c = 0; idx_c < capacitors.size(); ++idx_c) {
+        auto& c = capacitors[idx_c];
+        int p = idx(c.node1), q = idx(c.node2);
+        double C = c.value;
+        double G = C / dt;
+        if (p != -1) {
+            A[p][p] = A[p][p] + node(G,0);
+            if (q != -1) A[p][q] = A[p][q] - node(G,0);
+        }
+        if (q != -1) {
+            A[q][q] = A[q][q] + node(G,0);
+            if (p != -1) A[q][p] = A[q][p] - node(G,0);
+        }
+        double Vdiff_prev = prev_cap_volt[idx_c];
+        if (p != -1) b[p] = b[p] + node(G * Vdiff_prev, 0);
+        if (q != -1) b[q] = b[q] - node(G * Vdiff_prev, 0);
+    }
+
+    // GMIN to ground
+    for (int i = 0; i < n_nodes; ++i) {
+        A[i][i] = A[i][i] + node(GMIN,0);
+    }
+}
+
+void solve_transient(double tstop, double dt, ostream& out) {
+    int n_nodes, n_vs;
+    vector<double> x0 = solve_dc_full(n_nodes, n_vs);
+    int total_vars = n_nodes + n_vs;
+    if (total_vars == 0) {
+        out << "No nodes." << endl;
+        return;
+    }
+
+    node** A = new node*[total_vars];
+    for (int i = 0; i < total_vars; ++i) A[i] = new node[total_vars]();
+    node* b = new node[total_vars]();
+    node* x = new node[total_vars]();
+    for (int i = 0; i < total_vars; ++i) x[i] = node(x0[i], 0);
+
+    // Initial capacitor voltage differences
+    vector<double> prev_cap_volt(capacitors.size());
+    for (size_t i = 0; i < capacitors.size(); ++i) {
+        auto& c = capacitors[i];
+        int p = (c.node1 == 0) ? -1 : c.node1 - 1;
+        int q = (c.node2 == 0) ? -1 : c.node2 - 1;
+        double Vp = (p == -1) ? 0.0 : x0[p];
+        double Vq = (q == -1) ? 0.0 : x0[q];
+        prev_cap_volt[i] = Vp - Vq;
+    }
+    // Initial inductor currents
+    int ind_start = n_nodes + voltage_sources.size();
+    vector<double> prev_ind_curr(inductors.size());
+    for (size_t i = 0; i < inductors.size(); ++i) {
+        prev_ind_curr[i] = x0[ind_start + i];
+    }
+
+    double t = 0.0;
+    const double eps = 1e-12;
+    // Output header: time then each node voltage (real part only)
+    out << "Time(s)";
+    for (int i = 1; i <= n_nodes; ++i) out << "\tV" << i;
+    out << endl;
+    // Output initial state (t=0)
+    out << fixed << setprecision(6) << t;
+    for (int i = 0; i < n_nodes; ++i) out << "\t" << x[i].volt_re;
+    out << endl;
+
+    const int MAX_ITER = 100;
+    while (t < tstop - eps) {
+        double dt_step = min(dt, tstop - t);
+        double tnow = t + dt_step;   // current time point
+        bool converged = false;
+        int iter = 0;
+        while (iter < MAX_ITER && !converged) {
+            // Clear matrix
+            for (int i = 0; i < total_vars; ++i) {
+                fill(A[i], A[i] + total_vars, node(0,0));
+                b[i] = node(0,0);
+            }
+            vector<double> x_curr(total_vars);
+            for (int i = 0; i < total_vars; ++i) x_curr[i] = x[i].volt_re;
+
+            // Pass current time tnow for source evaluation
+            build_transient_mna(n_nodes, n_vs, dt_step, tnow, x_curr,
+                                prev_cap_volt, prev_ind_curr, A, b);
+
+            node* x_new = new node[total_vars]();
+            gauss_elimination(total_vars, A, b, x_new);
+
+            // Convergence check
+            double max_volt_change = 0.0, max_volt = 0.0;
+            double max_curr_change = 0.0, max_curr = 0.0;
+            for (int i = 0; i < n_nodes; ++i) {
+                double delta = fabs(x_new[i].volt_re - x[i].volt_re);
+                if (delta > max_volt_change) max_volt_change = delta;
+                if (fabs(x_new[i].volt_re) > max_volt) max_volt = fabs(x_new[i].volt_re);
+            }
+            for (int i = n_nodes; i < total_vars; ++i) {
+                double delta = fabs(x_new[i].volt_re - x[i].volt_re);
+                if (delta > max_curr_change) max_curr_change = delta;
+                if (fabs(x_new[i].volt_re) > max_curr) max_curr = fabs(x_new[i].volt_re);
+            }
+            // Update solution
+            for (int i = 0; i < total_vars; ++i) x[i] = x_new[i];
+            delete[] x_new;
+
+            if (max_volt_change < RELTOL * max_volt + VNTOL &&
+                max_curr_change < RELTOL * max_curr + ABSTOL) {
+                converged = true;
+            }
+            iter++;
+        }
+        if (!converged) {
+            cerr << "Warning: Transient iteration did not converge at t = " << tnow << endl;
+        }
+
+        // Update history (capacitor voltages, inductor currents)
+        for (size_t i = 0; i < capacitors.size(); ++i) {
+            auto& c = capacitors[i];
+            int p = (c.node1 == 0) ? -1 : c.node1 - 1;
+            int q = (c.node2 == 0) ? -1 : c.node2 - 1;
+            double Vp = (p == -1) ? 0.0 : x[p].volt_re;
+            double Vq = (q == -1) ? 0.0 : x[q].volt_re;
+            prev_cap_volt[i] = Vp - Vq;
+        }
+        for (size_t i = 0; i < inductors.size(); ++i) {
+            prev_ind_curr[i] = x[ind_start + i].volt_re;
+        }
+
+        t = tnow;
+        
+        // Output current time and node voltages
+        out << fixed << setprecision(6) << t;
+        for (int i = 0; i < n_nodes; ++i) out << "\t" << x[i].volt_re;
+        out << endl;
+        
+    }
+
+    // Cleanup
     for (int i = 0; i < total_vars; ++i) delete[] A[i];
     delete[] A; delete[] b; delete[] x;
 }
@@ -1046,15 +1432,16 @@ int main() {
             cout << "1. DC analysis" << endl;
             cout << "2. AC single frequency analysis" << endl;
             cout << "3. AC sweep analysis" << endl;
-            cout << "4. Return to main menu" << endl;
+            cout << "4. Transient analysis" << endl;
+            cout << "5. Return to main menu" << endl;
             cout << "Choose: ";
             int sub = read_int("");
 
-            if (sub == 4) break;
+            if (sub == 5) break;
 
             switch (sub) {
                 case 1: {
-                    string outname = base + "DC.simout";
+                    string outname = base + "DC.txt";
                     ofstream fout(outname);
                     if (fout) {
                         solve_dc_operating_point(fout);
@@ -1069,7 +1456,7 @@ int main() {
                 case 2: {
                     cout << "Enter frequency (Hz): ";
                     double freq = read_double_with_units(cin);
-                    string outname = base + "AC.simout";
+                    string outname = base + "AC.txt";
                     ofstream fout(outname);
                     if (fout) {
                         fout << freq << endl;
@@ -1087,7 +1474,6 @@ int main() {
                     double amp;
                     double start, end;
                     int sweep_type, points;
-
                     bool valid_source = false;
                     while (!valid_source) {
                         cout << "Enter active source name (e.g., V1 or I1): ";
@@ -1110,7 +1496,6 @@ int main() {
                             cout << "Error: Source '" << keep_name << "' not found or not AC type. Please re-enter." << endl;
                         }
                     }
-
                     cout << "Enter amplitude for this source: ";
                     amp = read_double_with_units(cin);
                     cout << "Enter start and end frequencies (Hz): ";
@@ -1119,7 +1504,7 @@ int main() {
                     sweep_type = read_int("Sweep type: 1-Linear, 2-Decade (points per decade): ");
                     points = read_int("Enter number of points (linear: total points, decade: points per decade): ");
 
-                    string outname = base + "ACsweep.simout";
+                    string outname = base + "ACsweep.txt";
                     ofstream fout(outname);
                     if (fout) {
                         solve_ac_sweep(start, end, points, sweep_type, keep_name, amp, fout);
@@ -1128,6 +1513,29 @@ int main() {
                     } else {
                         cerr << "Cannot write to " << outname << endl;
                     }
+                    break;
+                }
+                case 4: {
+                    cout << "Enter stop time (s): ";
+                    double tstop = read_double_with_units(cin);
+                    cout << "Enter timestep (s): ";
+                    double dt = read_double_with_units(cin);
+                    TIMESTEP = dt;
+                    string outname = base + "TRAN.txt";
+                    ofstream fout(outname);
+                    if (fout) {
+                        Timer sim_timer;
+                        sim_timer.start();
+                        solve_transient(tstop, dt, fout);
+                        fout.close();
+                        sim_timer.stop();
+                        cout << "Transient simulation took: " << sim_timer << endl;
+                        cout << "Transient results written to " << outname << endl;
+                    } else {
+                        cerr << "Cannot write to " << outname << endl;
+                    }
+                    // Also print to console briefly (optional)
+                    //solve_transient(tstop, dt, cout);
                     break;
                 }
                 default:
