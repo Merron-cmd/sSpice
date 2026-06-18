@@ -138,8 +138,11 @@ void build_transient_mna(int n_nodes, int n_vs, double dt, double time,
                          const vector<double>& x,
                          const vector<double>& prev_cap_volt,
                          const vector<double>& prev_ind_curr,
+                         const vector<double>& prev_cap_current,
+                         const vector<double>& prev_ind_voltage,
+                         int method,
                          node** A, node* b);
-void solve_transient(double tstop, double dt, ostream& out);
+void solve_transient(double tstop, double dt, ostream& out, int method);
 
 // ==================== Global Data Structures ====================
 string current_filename;
@@ -991,6 +994,9 @@ void build_transient_mna(int n_nodes, int n_vs, double dt, double time,
                          const vector<double>& x,
                          const vector<double>& prev_cap_volt,
                          const vector<double>& prev_ind_curr,
+                         const vector<double>& prev_cap_current,
+                         const vector<double>& prev_ind_voltage,
+                         int method,
                          node** A, node* b) {
     auto idx = [&](int node) { return (node == 0) ? -1 : node - 1; };
 
@@ -1057,20 +1063,31 @@ void build_transient_mna(int n_nodes, int n_vs, double dt, double time,
         vs_idx++;
     }
 
-    // Inductors (Backward Euler: Vp - Vq - (L/dt)*i = -(L/dt)*i_prev)
+    // Inductors
     int ind_start = n_nodes + voltage_sources.size();
     for (size_t idx_l = 0; idx_l < inductors.size(); ++idx_l) {
         auto& l = inductors[idx_l];
         int p = idx(l.node1), q = idx(l.node2);
         double L = l.value;
-        double G = L / dt;
         int ivar = ind_start + idx_l;
-        if (p != -1) A[p][ivar] = A[p][ivar] + node(1,0);
-        if (q != -1) A[q][ivar] = A[q][ivar] - node(1,0);
-        if (p != -1) A[ivar][p] = A[ivar][p] + node(1,0);
-        if (q != -1) A[ivar][q] = A[ivar][q] - node(1,0);
-        A[ivar][ivar] = A[ivar][ivar] - node(G,0);
-        b[ivar] = node(-G * prev_ind_curr[idx_l], 0);
+
+        if (method == 0) { // Backward Euler
+            double R = L / dt;
+            if (p != -1) A[p][ivar] = A[p][ivar] + node(1,0);
+            if (q != -1) A[q][ivar] = A[q][ivar] - node(1,0);
+            if (p != -1) A[ivar][p] = A[ivar][p] + node(1,0);
+            if (q != -1) A[ivar][q] = A[ivar][q] - node(1,0);
+            A[ivar][ivar] = A[ivar][ivar] - node(R,0);
+            b[ivar] = node(-R * prev_ind_curr[idx_l], 0);
+        } else { // Trapezoidal
+            double R = 2.0 * L / dt;
+            if (p != -1) A[p][ivar] = A[p][ivar] + node(1,0);
+            if (q != -1) A[q][ivar] = A[q][ivar] - node(1,0);
+            if (p != -1) A[ivar][p] = A[ivar][p] + node(1,0);
+            if (q != -1) A[ivar][q] = A[ivar][q] - node(1,0);
+            A[ivar][ivar] = A[ivar][ivar] - node(R,0);
+            b[ivar] = node(-R * prev_ind_curr[idx_l] - prev_ind_voltage[idx_l], 0);
+        }
     }
 
     // VCVS
@@ -1156,23 +1173,40 @@ void build_transient_mna(int n_nodes, int n_vs, double dt, double time,
         if (q != -1) b[q] = b[q] + node(Ieq,0);
     }
 
-    // Capacitors (Backward Euler: i = C/dt*(V - V_prev))
+    // Capacitors
     for (size_t idx_c = 0; idx_c < capacitors.size(); ++idx_c) {
         auto& c = capacitors[idx_c];
         int p = idx(c.node1), q = idx(c.node2);
         double C = c.value;
-        double G = C / dt;
-        if (p != -1) {
-            A[p][p] = A[p][p] + node(G,0);
-            if (q != -1) A[p][q] = A[p][q] - node(G,0);
+
+        if (method == 0) { // Backward Euler
+            double G = C / dt;
+            if (p != -1) {
+                A[p][p] = A[p][p] + node(G,0);
+                if (q != -1) A[p][q] = A[p][q] - node(G,0);
+            }
+            if (q != -1) {
+                A[q][q] = A[q][q] + node(G,0);
+                if (p != -1) A[q][p] = A[q][p] - node(G,0);
+            }
+            double Vdiff_prev = prev_cap_volt[idx_c];
+            if (p != -1) b[p] = b[p] + node(G * Vdiff_prev, 0);
+            if (q != -1) b[q] = b[q] - node(G * Vdiff_prev, 0);
+        } else { // Trapezoidal
+            double G = 2.0 * C / dt;
+            if (p != -1) {
+                A[p][p] = A[p][p] + node(G,0);
+                if (q != -1) A[p][q] = A[p][q] - node(G,0);
+            }
+            if (q != -1) {
+                A[q][q] = A[q][q] + node(G,0);
+                if (p != -1) A[q][p] = A[q][p] - node(G,0);
+            }
+            double Vdiff_prev = prev_cap_volt[idx_c];
+            double I_prev = prev_cap_current[idx_c];
+            if (p != -1) b[p] = b[p] + node(G * Vdiff_prev + I_prev, 0);
+            if (q != -1) b[q] = b[q] - node(G * Vdiff_prev + I_prev, 0);
         }
-        if (q != -1) {
-            A[q][q] = A[q][q] + node(G,0);
-            if (p != -1) A[q][p] = A[q][p] - node(G,0);
-        }
-        double Vdiff_prev = prev_cap_volt[idx_c];
-        if (p != -1) b[p] = b[p] + node(G * Vdiff_prev, 0);
-        if (q != -1) b[q] = b[q] - node(G * Vdiff_prev, 0);
     }
 
     // GMIN to ground
@@ -1181,7 +1215,7 @@ void build_transient_mna(int n_nodes, int n_vs, double dt, double time,
     }
 }
 
-void solve_transient(double tstop, double dt, ostream& out) {
+void solve_transient(double tstop, double dt, ostream& out, int method) {
     int n_nodes, n_vs;
     vector<double> x0 = solve_dc_full(n_nodes, n_vs);
     int total_vars = n_nodes + n_vs;
@@ -1213,6 +1247,10 @@ void solve_transient(double tstop, double dt, ostream& out) {
         prev_ind_curr[i] = x0[ind_start + i];
     }
 
+    // For trapezoidal method, we need previous capacitor currents and inductor voltages
+    vector<double> prev_cap_current(capacitors.size(), 0.0);
+    vector<double> prev_ind_voltage(inductors.size(), 0.0);
+
     double t = 0.0;
     const double eps = 1e-12;
     // Output header: time then each node voltage (real part only)
@@ -1241,7 +1279,9 @@ void solve_transient(double tstop, double dt, ostream& out) {
 
             // Pass current time tnow for source evaluation
             build_transient_mna(n_nodes, n_vs, dt_step, tnow, x_curr,
-                                prev_cap_volt, prev_ind_curr, A, b);
+                                prev_cap_volt, prev_ind_curr,
+                                prev_cap_current, prev_ind_voltage,
+                                method, A, b);
 
             node* x_new = new node[total_vars]();
             gauss_elimination(total_vars, A, b, x_new);
@@ -1280,19 +1320,35 @@ void solve_transient(double tstop, double dt, ostream& out) {
             int q = (c.node2 == 0) ? -1 : c.node2 - 1;
             double Vp = (p == -1) ? 0.0 : x[p].volt_re;
             double Vq = (q == -1) ? 0.0 : x[q].volt_re;
-            prev_cap_volt[i] = Vp - Vq;
+            double Vdiff = Vp - Vq;
+            // Update current for trapezoidal if needed
+            if (method == 1) {
+                double G = 2.0 * c.value / dt_step;
+                prev_cap_current[i] = G * (Vdiff - prev_cap_volt[i]) - prev_cap_current[i];
+                // Note: prev_cap_current on RHS is old value, then we overwrite
+            }
+            prev_cap_volt[i] = Vdiff;
         }
         for (size_t i = 0; i < inductors.size(); ++i) {
-            prev_ind_curr[i] = x[ind_start + i].volt_re;
+            auto& l = inductors[i];
+            int p = (l.node1 == 0) ? -1 : l.node1 - 1;
+            int q = (l.node2 == 0) ? -1 : l.node2 - 1;
+            double Vp = (p == -1) ? 0.0 : x[p].volt_re;
+            double Vq = (q == -1) ? 0.0 : x[q].volt_re;
+            double Vdiff = Vp - Vq;
+            double i_curr = x[ind_start + i].volt_re;
+            if (method == 1) {
+                prev_ind_voltage[i] = Vdiff; // or compute from formula
+            }
+            prev_ind_curr[i] = i_curr;
         }
 
         t = tnow;
-        
+
         // Output current time and node voltages
         out << fixed << setprecision(6) << t;
         for (int i = 0; i < n_nodes; ++i) out << "\t" << x[i].volt_re;
         out << endl;
-        
     }
 
     // Cleanup
@@ -1449,7 +1505,7 @@ int main() {
                         solve_dc_operating_point(fout);
                         fout.close();
                         sim_timer.stop();
-                        cout << "Transient simulation took: " << sim_timer << endl;
+                        cout << "DC simulation took: " << sim_timer << endl;
                         cout << "DC results written to " << outname << endl;
                     } else {
                         cerr << "Cannot write to " << outname << endl;
@@ -1469,7 +1525,7 @@ int main() {
                         solve_ac_single_frequency(freq, fout, false);
                         fout.close();
                         sim_timer.stop();
-                        cout << "Transient simulation took: " << sim_timer << endl;
+                        cout << "AC simulation took: " << sim_timer << endl;
                         cout << "AC single frequency results written to " << outname << endl;
                     } else {
                         cerr << "Cannot write to " << outname << endl;
@@ -1520,7 +1576,7 @@ int main() {
                         solve_ac_sweep(start, end, points, sweep_type, keep_name, amp, fout);
                         fout.close();
                         sim_timer.stop();
-                        cout << "Transient simulation took: " << sim_timer << endl;
+                        cout << "AC sweep simulation took: " << sim_timer << endl;
                         cout << "AC sweep results written to " << outname << endl;
                     } else {
                         cerr << "Cannot write to " << outname << endl;
@@ -1528,6 +1584,8 @@ int main() {
                     break;
                 }
                 case 4: {
+                    cout << "Select transient method: 1-Backward Euler, 2-Trapezoidal: ";
+                    int method = read_int("");
                     cout << "Enter stop time (s): ";
                     double tstop = read_double_with_units(cin);
                     cout << "Enter timestep (s): ";
@@ -1538,7 +1596,7 @@ int main() {
                     if (fout) {
                         Timer sim_timer;
                         sim_timer.start();
-                        solve_transient(tstop, dt, fout);
+                        solve_transient(tstop, dt, fout, method);
                         fout.close();
                         sim_timer.stop();
                         cout << "Transient simulation took: " << sim_timer << endl;
@@ -1546,8 +1604,6 @@ int main() {
                     } else {
                         cerr << "Cannot write to " << outname << endl;
                     }
-                    // Also print to console briefly (optional)
-                    //solve_transient(tstop, dt, cout);
                     break;
                 }
                 default:
