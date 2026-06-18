@@ -32,9 +32,11 @@ struct node {
 #define GMIN 1e-12
 #define VNTOL 1e-6
 #define ABSTOL 1e-12
+#define RELTOL 1e-4
 
 // ==================== Function Declarations ====================
 double norm2(const node& z);
+void matrix_mul_vec(int n, node** A, node* x, node* ans);
 void gauss_elimination(int n, node** A, node* b, node* x);
 void read_netlist(istream& in);
 void build_dc_mna(int n_nodes, int n_vs, node** A, node* b);
@@ -70,8 +72,7 @@ struct Inductor { string name; int node1, node2; double value; };
 const double Is = 1e-14;
 const double VT = 0.026;
 
-struct Diode
-{
+struct Diode {
     string name;
     int node1, node2;
 };
@@ -84,12 +85,60 @@ The I-V model is:
 I=Is(exp(V/VT) - 1)
 */
 
+/*
+Voltage control Voltage source
+Abbr: E
+*/
+struct VCVS {
+    string name;
+    int node1, node2;
+    int node3, node4;
+    double gain;
+};
+
+/*
+Voltage control current source
+Abbr: G
+*/
+struct VCCS {
+    string name;
+    int node1, node2;
+    int node3, node4;
+    double trans;
+};
+
+/*
+Current control current source
+Abbr: F
+*/
+struct CCCS {
+    string name;
+    int node1, node2;
+    int node3, node4;
+    double gain;
+};
+
+/*
+Current control voltage source
+Abbr: H
+*/
+struct CCVS {
+    string name;
+    int node1, node2;
+    int node3, node4;
+    double trans;
+};
+
 vector<VoltageSource> voltage_sources;
 vector<CurrentSource> current_sources;
 vector<Resistor> resistors;
 vector<Capacitor> capacitors;
 vector<Inductor> inductors;
 vector<Diode> diodes;
+vector<VCVS> vcvs;
+vector<VCCS> vccs;
+vector<CCCS> cccs;
+vector<CCVS> ccvs;
 
 // ====== DC operating point storage (for AC small-signal) ======
 vector<double> dc_voltages;  // index 0 corresponds to node 1
@@ -99,13 +148,21 @@ double norm2(const node& z) {
     return z.volt_re * z.volt_re + z.volt_im * z.volt_im;
 }
 
-double norm2n(node *x, node *y, int a, int b)
-{
+double norm2n(node *x, node *y, int a, int b) {
     double norm = 0.0;
     for(int i = a; i <= b; i ++){
         norm += norm2(x[i] - y[i]);
     }
     return norm;
+}
+
+void matrix_mul_vec(int n, node** A, node* x, node* ans) {
+    for(int i = 0; i < n; ++i) {
+        ans[i] = node(0, 0);
+        for(int j = 0; j < n; ++j) {
+            ans[i] = ans[i] + A[i][j] * x[j];
+        }
+    }
 }
 
 void gauss_elimination(int n, node** A, node* b, node* x) {
@@ -280,6 +337,38 @@ void read_netlist(istream& in) {
                 islinear = 0;
                 diodes.push_back({name, n1, n2});
                 break;
+            case 'E': case 'e': {   // VCVS
+                int n3, n4;
+                double gain;
+                n3 = stoi(token);         // token 中是第三个字段（控制正节点）
+                in >> n4 >> gain;
+                vcvs.push_back({name, n1, n2, n3, n4, gain});
+                break;
+            }
+            case 'G': case 'g': {   // VCCS
+                int n3, n4;
+                double trans;
+                n3 = stoi(token);
+                in >> n4 >> trans;
+                vccs.push_back({name, n1, n2, n3, n4, trans});
+                break;
+            }
+            case 'F': case 'f': {   // CCCS
+                int n3, n4;
+                double gain;
+                n3 = stoi(token);         // 控制电流流过的支路两端节点（依您的结构体定义）
+                in >> n4 >> gain;
+                cccs.push_back({name, n1, n2, n3, n4, gain});
+                break;
+            }
+            case 'H': case 'h': {   // CCVS
+                int n3, n4;
+                double trans;
+                n3 = stoi(token);
+                in >> n4 >> trans;
+                ccvs.push_back({name, n1, n2, n3, n4, trans});
+                break;
+            }
             default:
                 cerr << "Error: unknown component type '" << type << "'" << endl;
         }
@@ -297,6 +386,10 @@ void read_netlist(istream& in) {
     for (auto& r : resistors)       if (r.node1==0 || r.node2==0) has_gnd = true;
     for (auto& c : capacitors)      if (c.node1==0 || c.node2==0) has_gnd = true;
     for (auto& l : inductors)       if (l.node1==0 || l.node2==0) has_gnd = true;
+    for (auto& e : vcvs)            if (e.node1==0 || e.node2==0 || e.node3==0 || e.node4==0) has_gnd = true;
+    for (auto& g : vccs)            if (g.node1==0 || g.node2==0 || g.node3==0 || g.node4==0) has_gnd = true;
+    for (auto& f : cccs)            if (f.node1==0 || f.node2==0 || f.node3==0 || f.node4==0) has_gnd = true;
+    for (auto& h : ccvs)            if (h.node1==0 || h.node2==0 || h.node3==0 || h.node4==0) has_gnd = true;
     if (!has_gnd) cerr << "Warning: No component connected to GND (node 0). Circuit may be floating!" << endl;
 }
 
@@ -355,6 +448,10 @@ void build_dc_mna(int n_nodes, int n_vs, node** A, node* b) {
         if (p != -1) b[p] = b[p] + node(I,0);
         if (q != -1) b[q] = b[q] - node(I,0);
     }
+
+    /*
+    ====================Additon Part====================
+    */
     // Voltage sources (DC) + Inductors (short circuit)
     int vs_idx = n_nodes;
     for (auto& v : voltage_sources) {
@@ -582,24 +679,24 @@ void solve_dc_operating_point(ostream& out, bool print_output) {
         bool converged = false;
 
         while (iter < MAX_ITER) {
-            // 清空矩阵和RHS
+            // set A and b to zeros
             for (int i = 0; i < total_vars; ++i) {
                 fill(A[i], A[i] + total_vars, node(0,0));
                 b[i] = node(0,0);
             }
 
-            // 构建线性化系统（基于当前 x_last）
+            // construct linear system based on x_last
             build_dc_mna_nonlinear(n_nodes, n_vs, A, b, x_last);
 
-            // 添加 GMIN 防止浮地
+            // add GMIN
             for (int i = 0; i < n_nodes; ++i) {
                 A[i][i] = A[i][i] + node(GMIN, 0);
             }
 
-            // 求解得到 x（牛顿步）
+            // solve current x
             gauss_elimination(total_vars, A, b, x);
 
-            // 计算变化量
+            // compute the change
             double max_delta_v = 0.0, max_delta_i = 0.0;
             for (int i = 0; i < n_nodes; ++i) {
                 double delta = fabs(x[i].volt_re - x_last[i].volt_re);
@@ -610,7 +707,7 @@ void solve_dc_operating_point(ostream& out, bool print_output) {
                 if (delta > max_delta_i) max_delta_i = delta;
             }
 
-            // 阻尼缩放
+            // Damping scale
             double scale = 1.0;
             if (max_delta_v > MAX_V_STEP) {
                 scale = min(scale, MAX_V_STEP / max_delta_v);
@@ -619,24 +716,34 @@ void solve_dc_operating_point(ostream& out, bool print_output) {
                 scale = min(scale, MAX_I_STEP / max_delta_i);
             }
 
-            // 应用阻尼：x = x_last + scale * (x - x_last)
+            // Apply damping：x = x_last + scale * (x - x_last)
             if (scale < 1.0) {
                 for (int i = 0; i < total_vars; ++i) {
                     x[i].volt_re = x_last[i].volt_re + scale * (x[i].volt_re - x_last[i].volt_re);
-                    x[i].volt_im = 0.0; // 直流分析虚部始终为0
+                    x[i].volt_im = 0.0; // Im is 0 when DC applied
                 }
             }
 
-            // 检查收敛条件
+            // check convergence condition 
+            double max_volt_change = 0.0, max_curr_change = 0.0;
             double max_volt = 0.0, max_curr = 0.0;
+            double max_err = 0.0, max_total_curr = 0.0;
+            node* b_compute = new node[total_vars]();
+            matrix_mul_vec(total_vars, A, x, b_compute);
+            for(int i = 0; i < n_nodes; ++i) {
+                max_err = max(max_err, fabs(b[i].volt_re - b_compute[i].volt_re));
+                max_total_curr = max(max_total_curr, max(fabs(b[i].volt_re), fabs(b_compute[i].volt_re)));
+            }
             for (int i = 0; i < n_nodes; ++i) {
-                max_volt = max(max_volt, fabs(x[i].volt_re - x_last[i].volt_re));
+                max_volt_change = max(max_volt_change, fabs(x[i].volt_re - x_last[i].volt_re));
+                max_volt = max(max_volt, max(fabs(x[i].volt_re), fabs(x_last[i].volt_re)));
             }
             for (int i = n_nodes; i < total_vars; ++i) {
-                max_curr = max(max_curr, fabs(x[i].volt_re - x_last[i].volt_re));
+                max_curr_change = max(max_curr_change, fabs(x[i].volt_re - x_last[i].volt_re));
+                max_curr = max(max_volt, max(fabs(x[i].volt_re), fabs(x_last[i].volt_re)));
             }
 
-            if (max_volt < VNTOL && max_curr < ABSTOL) {
+            if (max_err < RELTOL * max_total_curr + ABSTOL && max_volt_change < RELTOL * max_volt + VNTOL && max_curr_change < RELTOL * max_curr + ABSTOL) {
                 converged = true;
                 break;
             }
