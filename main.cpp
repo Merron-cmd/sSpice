@@ -1444,8 +1444,12 @@ int main() {
                     string outname = base + "DC.txt";
                     ofstream fout(outname);
                     if (fout) {
+                        Timer sim_timer;
+                        sim_timer.start();
                         solve_dc_operating_point(fout);
                         fout.close();
+                        sim_timer.stop();
+                        cout << "Transient simulation took: " << sim_timer << endl;
                         cout << "DC results written to " << outname << endl;
                     } else {
                         cerr << "Cannot write to " << outname << endl;
@@ -1459,9 +1463,13 @@ int main() {
                     string outname = base + "AC.txt";
                     ofstream fout(outname);
                     if (fout) {
+                        Timer sim_timer;
+                        sim_timer.start();
                         fout << freq << endl;
                         solve_ac_single_frequency(freq, fout, false);
                         fout.close();
+                        sim_timer.stop();
+                        cout << "Transient simulation took: " << sim_timer << endl;
                         cout << "AC single frequency results written to " << outname << endl;
                     } else {
                         cerr << "Cannot write to " << outname << endl;
@@ -1507,8 +1515,12 @@ int main() {
                     string outname = base + "ACsweep.txt";
                     ofstream fout(outname);
                     if (fout) {
+                        Timer sim_timer;
+                        sim_timer.start();
                         solve_ac_sweep(start, end, points, sweep_type, keep_name, amp, fout);
                         fout.close();
+                        sim_timer.stop();
+                        cout << "Transient simulation took: " << sim_timer << endl;
                         cout << "AC sweep results written to " << outname << endl;
                     } else {
                         cerr << "Cannot write to " << outname << endl;
