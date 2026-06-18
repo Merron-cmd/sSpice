@@ -295,41 +295,67 @@ int read_int(const string& prompt) {
 
 // ==================== Netlist Reader ====================
 void read_netlist(istream& in) {
-    in >> c_size;
-    bool islinear = 1;
+    string line;
+    int line_no = 0;
+    bool islinear = true;
+
+    if (!(in >> c_size)) {
+        cerr << "Error: failed to read component count." << endl;
+        return;
+    }
+    getline(in, line);  // consume rest of first line
+
     for (int i = 0; i < c_size; ++i) {
-        string name; int n1, n2; string token;
-        in >> name >> n1 >> n2 >> token;
+        while (getline(in, line)) {
+            ++line_no;
+            size_t start = line.find_first_not_of(" \t\r\n");
+            if (start == string::npos) continue;
+            if (line[start] == '*' || line[start] == '/') continue;
+            break;
+        }
+        if (!in) {
+            cerr << "Error: unexpected EOF before reading " << c_size - i << " components." << endl;
+            return;
+        }
+
+        stringstream ss(line);
+        string name;
+        int n1, n2;
+        if (!(ss >> name >> n1 >> n2)) {
+            cerr << "Error: line " << line_no << " has insufficient fields: " << line << endl;
+            continue;
+        }
+
         char type = name[0];
         switch (type) {
             case 'V': case 'v': {
                 VoltageSource vs{name, n1, n2, DC_SOURCE, 0, 0, 0, 0, 0, 0, 0, 0};
+                string token;
+                if (!(ss >> token)) {
+                    cerr << "Error: line " << line_no << " missing source type for V source: " << line << endl;
+                    continue;
+                }
                 if (token == "DC" || token == "dc") {
-                    string val; in >> val;
+                    string val; ss >> val;
                     vs.type = DC_SOURCE;
                     vs.dc_value = parse_value(val);
                 } else if (token == "AC" || token == "ac") {
-                    string mag, freq, ph; in >> mag >> freq >> ph;
+                    string mag, freq, ph; ss >> mag >> freq >> ph;
                     vs.type = AC_SOURCE;
                     vs.ac_magnitude = parse_value(mag);
                     vs.ac_freq = parse_value(freq);
                     vs.ac_phase = parse_value(ph);
                     vs.dc_value = 0.0;
                 } else if (token == "SQUARE" || token == "square") {
-                    double amp = read_double_with_units(in);
-                    double freq = read_double_with_units(in);
-                    double duty = read_double_with_units(in);
-                    double offset = 0.0;
-                    if (!(in >> offset)) {
-                        in.clear();
-                        offset = 0.0;
-                    }
+                    string amp_s, freq_s, duty_s, offset_s;
+                    ss >> amp_s >> freq_s >> duty_s;
                     vs.type = SQUARE_SOURCE;
-                    vs.square_amp = amp;
-                    vs.square_freq = freq;
-                    vs.square_duty = duty;
-                    vs.square_offset = offset;
-                    vs.dc_value = offset;
+                    vs.square_amp = parse_value(amp_s);
+                    vs.square_freq = parse_value(freq_s);
+                    vs.square_duty = parse_value(duty_s);
+                    if (ss >> offset_s) vs.square_offset = parse_value(offset_s);
+                    else vs.square_offset = 0.0;
+                    vs.dc_value = vs.square_offset;
                 } else {
                     vs.type = DC_SOURCE;
                     vs.dc_value = parse_value(token);
@@ -339,32 +365,32 @@ void read_netlist(istream& in) {
             }
             case 'I': case 'i': {
                 CurrentSource cs{name, n1, n2, DC_SOURCE, 0, 0, 0, 0, 0, 0, 0, 0};
+                string token;
+                if (!(ss >> token)) {
+                    cerr << "Error: line " << line_no << " missing source type for I source: " << line << endl;
+                    continue;
+                }
                 if (token == "DC" || token == "dc") {
-                    string val; in >> val;
+                    string val; ss >> val;
                     cs.type = DC_SOURCE;
                     cs.dc_value = parse_value(val);
                 } else if (token == "AC" || token == "ac") {
-                    string mag, freq, ph; in >> mag >> freq >> ph;
+                    string mag, freq, ph; ss >> mag >> freq >> ph;
                     cs.type = AC_SOURCE;
                     cs.ac_magnitude = parse_value(mag);
                     cs.ac_freq = parse_value(freq);
                     cs.ac_phase = parse_value(ph);
                     cs.dc_value = 0.0;
                 } else if (token == "SQUARE" || token == "square") {
-                    double amp = read_double_with_units(in);
-                    double freq = read_double_with_units(in);
-                    double duty = read_double_with_units(in);
-                    double offset = 0.0;
-                    if (!(in >> offset)) {
-                        in.clear();
-                        offset = 0.0;
-                    }
+                    string amp_s, freq_s, duty_s, offset_s;
+                    ss >> amp_s >> freq_s >> duty_s;
                     cs.type = SQUARE_SOURCE;
-                    cs.square_amp = amp;
-                    cs.square_freq = freq;
-                    cs.square_duty = duty;
-                    cs.square_offset = offset;
-                    cs.dc_value = offset;
+                    cs.square_amp = parse_value(amp_s);
+                    cs.square_freq = parse_value(freq_s);
+                    cs.square_duty = parse_value(duty_s);
+                    if (ss >> offset_s) cs.square_offset = parse_value(offset_s);
+                    else cs.square_offset = 0.0;
+                    cs.dc_value = cs.square_offset;
                 } else {
                     cs.type = DC_SOURCE;
                     cs.dc_value = parse_value(token);
@@ -372,58 +398,59 @@ void read_netlist(istream& in) {
                 current_sources.push_back(cs);
                 break;
             }
-            case 'R': case 'r':
-                resistors.push_back({name, n1, n2, parse_value(token)});
+            case 'R': case 'r': {
+                string val; ss >> val;
+                resistors.push_back({name, n1, n2, parse_value(val)});
                 break;
-            case 'C': case 'c':
-                capacitors.push_back({name, n1, n2, parse_value(token)});
+            }
+            case 'C': case 'c': {
+                string val; ss >> val;
+                capacitors.push_back({name, n1, n2, parse_value(val)});
                 break;
-            case 'L': case 'l':
-                inductors.push_back({name, n1, n2, parse_value(token)});
+            }
+            case 'L': case 'l': {
+                string val; ss >> val;
+                inductors.push_back({name, n1, n2, parse_value(val)});
                 break;
-            case 'D': case 'd':
-                islinear = 0;
+            }
+            case 'D': case 'd': {
+                islinear = false;
                 diodes.push_back({name, n1, n2});
                 break;
+            }
             case 'E': case 'e': {
-                int n3, n4;
-                double gain;
-                n3 = stoi(token);
-                in >> n4 >> gain;
+                int n3, n4; double gain;
+                ss >> n3 >> n4 >> gain;
                 vcvs.push_back({name, n1, n2, n3, n4, gain});
                 break;
             }
             case 'G': case 'g': {
-                int n3, n4;
-                double trans;
-                n3 = stoi(token);
-                in >> n4 >> trans;
+                int n3, n4; double trans;
+                ss >> n3 >> n4 >> trans;
                 vccs.push_back({name, n1, n2, n3, n4, trans});
                 break;
             }
             case 'F': case 'f': {
-                string ctrl_name;
-                double gain;
-                ctrl_name = token;
-                in >> gain;
+                string ctrl_name; double gain;
+                ss >> ctrl_name >> gain;
                 cccs.push_back({name, n1, n2, ctrl_name, gain});
                 break;
             }
             case 'H': case 'h': {
-                string ctrl_name;
-                double trans;
-                ctrl_name = token;
-                in >> trans;
+                string ctrl_name; double trans;
+                ss >> ctrl_name >> trans;
                 ccvs.push_back({name, n1, n2, ctrl_name, trans});
                 break;
             }
             default:
-                cerr << "Error: unknown component type '" << type << "'" << endl;
+                cerr << "Error: at line " << line_no
+                     << " unknown component type '" << type
+                     << "' (line: " << line << ")" << endl;
         }
     }
-    if(islinear == 1) nonlinear = 0;
-    else nonlinear = 1;
-    // Check ground (same as original)
+
+    nonlinear = !islinear;
+
     bool has_gnd = false;
     for (auto& v : voltage_sources) if (v.node1==0 || v.node2==0) has_gnd = true;
     for (auto& i : current_sources) if (i.node1==0 || i.node2==0) has_gnd = true;
