@@ -131,6 +131,7 @@ string format_double(double val, int precision = 8);
 double parse_value(const string& s);
 double read_double_with_units(istream& in);
 int read_int(const string& prompt);
+void solve_dc_sweep(const string& source_name, double start, double end, int points, ostream& out);
 
 // ----- Transient functions -----
 vector<double> solve_dc_full(int& n_nodes, int& n_vs);
@@ -1002,6 +1003,78 @@ vector<double> solve_dc_full(int& n_nodes, int& n_vs) {
     return x_vec;
 }
 
+// ==================== DC Sweep Analysis ====================
+void solve_dc_sweep(const string& source_name, double start, double end, int points, ostream& out) {
+    // 查找源（电压源或电流源）
+    bool found = false;
+    double* value_ptr = nullptr;   // 指向源 dc_value 的指针
+
+    for (auto& v : voltage_sources) {
+        if (v.name == source_name) {
+            value_ptr = &v.dc_value;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        for (auto& i : current_sources) {
+            if (i.name == source_name) {
+                value_ptr = &i.dc_value;
+                found = true;
+                break;
+            }
+        }
+    }
+    if (!found) {
+        cerr << "Error: source '" << source_name << "' not found." << endl;
+        return;
+    }
+
+    double original_value = *value_ptr;   // 保存原始值以便恢复
+
+    // 生成扫描点（线性）
+    vector<double> sweep_values;
+    if (points <= 1) {
+        sweep_values.push_back(start);
+    } else {
+        double step = (end - start) / (points - 1);
+        for (int i = 0; i < points; ++i)
+            sweep_values.push_back(start + i * step);
+    }
+
+    // 先求一次起始值以获取节点数，并输出表头
+    *value_ptr = start;
+    int n_nodes, n_vs;
+    vector<double> x = solve_dc_full(n_nodes, n_vs);   // 首次求解
+
+    out << "Source_value";
+    for (int i = 1; i <= n_nodes; ++i)
+        out << "\tV" << i;
+    out << endl;
+
+    // 输出起始点的结果
+    out << fixed << setprecision(6) << start;
+    for (int i = 0; i < n_nodes; ++i)
+        out << "\t" << x[i];
+    out << endl;
+
+    // 扫描剩余点
+    for (size_t idx = 1; idx < sweep_values.size(); ++idx) {
+        double val = sweep_values[idx];
+        *value_ptr = val;
+        int n2, vs2;
+        vector<double> x2 = solve_dc_full(n2, vs2);
+        // 通常节点数不会改变，若改变可忽略（此处假设不变）
+        out << fixed << setprecision(6) << val;
+        for (int i = 0; i < n2; ++i)
+            out << "\t" << x2[i];
+        out << endl;
+    }
+
+    // 恢复源值
+    *value_ptr = original_value;
+}
+
 void solve_dc_operating_point(ostream& out, bool print_output) {
     int n_nodes, n_vs;
     vector<double> x = solve_dc_full(n_nodes, n_vs);
@@ -1513,14 +1586,15 @@ int main() {
         while (true) {
             cout << "\n--- Circuit Menu ---" << endl;
             cout << "1. DC analysis" << endl;
-            cout << "2. AC single frequency analysis" << endl;
-            cout << "3. AC sweep analysis" << endl;
-            cout << "4. Transient analysis" << endl;
-            cout << "5. Return to main menu" << endl;
+            cout << "2. DC sweep analysis" << endl;
+            cout << "3. AC single frequency analysis" << endl;
+            cout << "4. AC sweep analysis" << endl;
+            cout << "5. Transient analysis" << endl;
+            cout << "6. Return to main menu" << endl;
             cout << "Choose: ";
             int sub = read_int("");
 
-            if (sub == 5) break;
+            if (sub == 6) break;
 
             switch (sub) {
                 case 1: {
@@ -1541,6 +1615,31 @@ int main() {
                     break;
                 }
                 case 2: {
+                    string source_name;
+                    cout << "Enter source name (e.g., V1 or I1): ";
+                    cin >> source_name;
+                    cout << "Enter start value: ";
+                    double start = read_double_with_units(cin);
+                    cout << "Enter end value: ";
+                    double end = read_double_with_units(cin);
+                    int points = read_int("Enter number of points: ");
+
+                    string outname = base + "DCsweep.txt";
+                    ofstream fout(outname);
+                    if (fout) {
+                        Timer sim_timer;
+                        sim_timer.start();
+                        solve_dc_sweep(source_name, start, end, points, fout);
+                        fout.close();
+                        sim_timer.stop();
+                        cout << "DC sweep simulation took: " << sim_timer << endl;
+                        cout << "DC sweep results written to " << outname << endl;
+                    } else {
+                        cerr << "Cannot write to " << outname << endl;
+                    }
+                    break;
+                }
+                case 3: {
                     cout << "Enter frequency (Hz): ";
                     double freq = read_double_with_units(cin);
                     string outname = base + "AC.txt";
@@ -1560,7 +1659,7 @@ int main() {
                     solve_ac_single_frequency(freq, cout, true);
                     break;
                 }
-                case 3: {
+                case 4: {
                     string keep_name;
                     double amp;
                     double start, end;
@@ -1610,7 +1709,7 @@ int main() {
                     }
                     break;
                 }
-                case 4: {
+                case 5: {
                     cout << "Select transient method: 1-Backward Euler, 2-Trapezoidal: ";
                     int method = read_int("");
                     cout << "Enter stop time (s): ";
